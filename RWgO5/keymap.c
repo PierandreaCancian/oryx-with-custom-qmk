@@ -23,14 +23,15 @@ enum custom_keycodes {
 /* ==================================================================
  * AUTOCLK - hold-to-autoclick
  *
- * Holding AUTOCLK repeatedly taps left mouse button 1, with a random
- * gap of CLICK_MIN_MS..CLICK_MAX_MS between each click. Releasing the
- * key stops immediately and leaves BTN1 up.
+ * Holding AUTOCLK repeatedly taps CLICK_BUTTON, with a random gap of
+ * CLICK_MIN_MS..CLICK_MAX_MS between each click. Releasing the key
+ * stops immediately and leaves the button up.
  * ================================================================== */
 
-#define CLICK_MIN_MS   1   /* shortest gap between clicks (ms)   */
-#define CLICK_MAX_MS   9   /* longest gap between clicks (ms)    */
-#define CLICK_HOLD_MS  2   /* how long BTN1 stays down (ms)      */
+#define CLICK_BUTTON   KC_MS_BTN2 /* which mouse button to click  */
+#define CLICK_MIN_MS   25  /* shortest gap between clicks (ms)   */
+#define CLICK_MAX_MS   50  /* longest gap between clicks (ms)    */
+#define CLICK_HOLD_MS  10  /* how long the button stays down (ms)*/
 #define CLICK_MAX_HOLD 0   /* safety cutoff in ms; 0 disables it */
 
 /* xorshift32 PRNG. Avoids rand()/srand(), which pull in more than we
@@ -58,7 +59,7 @@ static uint8_t  ac_delay    = 0;
 static void autoclick_stop(void) {
   ac_active = false;
   if (ac_btn_down) {
-    unregister_code(KC_MS_BTN1);
+    unregister_code(CLICK_BUTTON);
     ac_btn_down = false;
   }
 }
@@ -434,11 +435,11 @@ void matrix_scan_user(void) {
   }
 
   if (ac_btn_down) {
-    unregister_code(KC_MS_BTN1);
+    unregister_code(CLICK_BUTTON);
     ac_btn_down = false;
     ac_delay    = ac_rng_range(CLICK_MIN_MS, CLICK_MAX_MS);
   } else {
-    register_code(KC_MS_BTN1);
+    register_code(CLICK_BUTTON);
     ac_btn_down = true;
     ac_delay    = CLICK_HOLD_MS;
   }
