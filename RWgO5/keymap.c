@@ -15,7 +15,88 @@ enum custom_keycodes {
   ST_MACRO_5,
   ST_MACRO_6,
   ST_MACRO_7,
+  AUTOCLK,
+  DUALHOLD,
 };
+
+
+/* ==================================================================
+ * AUTOCLK - hold-to-autoclick
+ *
+ * Holding AUTOCLK repeatedly taps left mouse button 1, with a random
+ * gap of CLICK_MIN_MS..CLICK_MAX_MS between each click. Releasing the
+ * key stops immediately and leaves BTN1 up.
+ * ================================================================== */
+
+#define CLICK_MIN_MS   1   /* shortest gap between clicks (ms)   */
+#define CLICK_MAX_MS   9   /* longest gap between clicks (ms)    */
+#define CLICK_HOLD_MS  2   /* how long BTN1 stays down (ms)      */
+#define CLICK_MAX_HOLD 0   /* safety cutoff in ms; 0 disables it */
+
+/* xorshift32 PRNG. Avoids rand()/srand(), which pull in more than we
+ * need and behave differently across targets. */
+static uint32_t ac_rng = 0x2545F491UL;
+
+static uint32_t ac_rng_next(void) {
+  ac_rng ^= ac_rng << 13;
+  ac_rng ^= ac_rng >> 17;
+  ac_rng ^= ac_rng << 5;
+  return ac_rng;
+}
+
+/* inclusive range [lo, hi] */
+static uint8_t ac_rng_range(uint8_t lo, uint8_t hi) {
+  return lo + (uint8_t)(ac_rng_next() % (uint32_t)(hi - lo + 1));
+}
+
+static bool     ac_active   = false;
+static bool     ac_btn_down = false;
+static uint16_t ac_last     = 0;
+static uint16_t ac_started  = 0;
+static uint8_t  ac_delay    = 0;
+
+static void autoclick_stop(void) {
+  ac_active = false;
+  if (ac_btn_down) {
+    unregister_code(KC_MS_BTN1);
+    ac_btn_down = false;
+  }
+}
+
+
+/* ==================================================================
+ * DUALHOLD - latch two letters down
+ *
+ * First tap holds both DH_KEY_1 and DH_KEY_2 down; a second tap
+ * releases them. Both go down in a single USB report.
+ *
+ * Caveat: physically typing either letter while the latch is engaged
+ * will send that key's release and silently break the latch for that
+ * letter. Avoid typing i/j while it is on.
+ * ================================================================== */
+
+#define DH_KEY_1 KC_I
+#define DH_KEY_2 KC_J
+
+static bool dh_active = false;
+
+static void dualhold_stop(void) {
+  if (dh_active) {
+    del_key(DH_KEY_1);
+    del_key(DH_KEY_2);
+    send_keyboard_report();
+    dh_active = false;
+  }
+}
+
+static void dualhold_start(void) {
+  if (!dh_active) {
+    add_key(DH_KEY_1);
+    add_key(DH_KEY_2);
+    send_keyboard_report();
+    dh_active = true;
+  }
+}
 
 
 
@@ -23,7 +104,7 @@ enum custom_keycodes {
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   [0] = LAYOUT_moonlander(
     KC_GRAVE,       KC_1,           KC_2,           KC_3,           KC_4,           KC_5,           MO(4),                                          MO(7),          KC_6,           KC_7,           KC_8,           KC_9,           KC_0,           KC_DELETE,      
-    KC_TAB,         KC_Q,           KC_W,           KC_E,           KC_R,           KC_T,           ST_MACRO_0,                                     KC_TRANSPARENT, KC_Y,           KC_U,           KC_I,           KC_O,           KC_P,           KC_BSLS,        
+    KC_TAB,         KC_Q,           KC_W,           KC_E,           KC_R,           KC_T,           ST_MACRO_0,                                     TG(9),          KC_Y,           KC_U,           KC_I,           KC_O,           KC_P,           KC_BSLS,        
     KC_ESCAPE,      KC_A,           KC_S,           KC_D,           KC_F,           KC_G,           ST_MACRO_1,                                                                     DM_PLY1,        KC_H,           KC_J,           KC_K,           KC_L,           KC_SCLN,        KC_QUOTE,       
     KC_LEFT_SHIFT,  KC_Z,           KC_X,           KC_C,           KC_V,           KC_B,                                           KC_N,           KC_M,           KC_COMMA,       KC_DOT,         KC_SLASH,       KC_RIGHT_SHIFT, 
     KC_APPLICATION, KC_RIGHT_ALT,   RALT(KC_RIGHT_CTRL),KC_LEFT_GUI,    KC_LEFT_ALT,    TG(8),                                                                                                          TG(1),          KC_LEFT,        KC_DOWN,        KC_UP,          KC_RIGHT,       KC_CAPS,        
@@ -99,7 +180,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_H,                                                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_SPACE,                                                                                                       KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    AUTOCLK,        DUALHOLD,       KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
   ),
   [10] = LAYOUT_moonlander(
     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
@@ -209,6 +290,15 @@ bool rgb_matrix_indicators_user(void) {
       case 7:
         set_layer_color(7);
         break;
+      case 9: {
+        /* Layer 9: flood every key with orange. Uses the same
+         * brightness-scaling helper as set_layer_color, so it still
+         * respects the user's RGB brightness setting. */
+        HSV hsv = { HSV_ORANGE };
+        RGB rgb = hsv_to_rgb_with_value(hsv);
+        rgb_matrix_set_color_all(rgb.r, rgb.g, rgb.b);
+        break;
+      }
       case 10:
         set_layer_color(10);
         break;
@@ -288,6 +378,33 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     }
     break;
 
+    case AUTOCLK:
+    if (record->event.pressed) {
+      /* reseed off the running timer so each hold differs */
+      ac_rng ^= timer_read32();
+      if (ac_rng == 0) {
+        ac_rng = 0x2545F491UL;
+      }
+      ac_active   = true;
+      ac_btn_down = false;
+      ac_last     = timer_read();
+      ac_started  = ac_last;
+      ac_delay    = 0;              /* fire on the next matrix scan */
+    } else {
+      autoclick_stop();
+    }
+    return false;
+
+    case DUALHOLD:
+    if (record->event.pressed) {    /* act on press, ignore release */
+      if (dh_active) {
+        dualhold_stop();
+      } else {
+        dualhold_start();
+      }
+    }
+    return false;
+
     case RGB_SLD:
         if (rawhid_state.rgb_control) {
             return false;
@@ -300,3 +417,31 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
   return true;
 }
 
+
+void matrix_scan_user(void) {
+  if (!ac_active) {
+    return;
+  }
+
+  /* folded away by the compiler when CLICK_MAX_HOLD is 0 */
+  if (CLICK_MAX_HOLD > 0 && timer_elapsed(ac_started) > CLICK_MAX_HOLD) {
+    autoclick_stop();
+    return;
+  }
+
+  if (timer_elapsed(ac_last) < ac_delay) {
+    return;
+  }
+
+  if (ac_btn_down) {
+    unregister_code(KC_MS_BTN1);
+    ac_btn_down = false;
+    ac_delay    = ac_rng_range(CLICK_MIN_MS, CLICK_MAX_MS);
+  } else {
+    register_code(KC_MS_BTN1);
+    ac_btn_down = true;
+    ac_delay    = CLICK_HOLD_MS;
+  }
+
+  ac_last = timer_read();
+}
