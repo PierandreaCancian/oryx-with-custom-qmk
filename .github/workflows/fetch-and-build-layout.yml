@@ -6,9 +6,9 @@ on:
       layout_id:
         description: "Layout id available in URL https://configure.zsa.io/voyager/layouts/[ID_IS_HERE]/latest"
         required: true
-        default: "g7jjw"
+        default: "RWgO5"
       layout_geometry:
-        description: "Keyboard type"
+        description: "moonlander/reva"
         type: choice
         options:
           - voyager
