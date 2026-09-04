@@ -8,7 +8,7 @@ on:
         required: true
         default: "RWgO5"
       layout_geometry:
-        description: "moonlander/reva"
+        description: "Keyboard type"
         type: choice
         options:
           - voyager
@@ -22,7 +22,7 @@ on:
           - ergodox_ez/stm32/shine
           - planck_ez
           - planck_ez/glow
-        default: voyager
+        default: moonlander/reva
 
 permissions:
   contents: write
