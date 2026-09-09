@@ -15,27 +15,33 @@ enum custom_keycodes {
   ST_MACRO_5,
   ST_MACRO_6,
   ST_MACRO_7,
-  AUTOCLK,
+  AUTOCLK_R,
+  AUTOCLK_L,
   DUALHOLD,
+  DUALTOG,
 };
 
 
 /* ==================================================================
- * AUTOCLK - hold-to-autoclick
+ * AUTOCLK_R / AUTOCLK_L - hold-to-autoclick
  *
- * Holding AUTOCLK repeatedly taps CLICK_BUTTON, with a random gap of
- * CLICK_MIN_MS..CLICK_MAX_MS between each click. Releasing the key
- * stops immediately and leaves the button up.
+ * Holding either key repeatedly taps that instance's mouse button,
+ * with a random gap of min_ms..max_ms between clicks. Releasing stops
+ * immediately and leaves the button up. The two are independent and
+ * can be held at the same time.
+ *
+ * The defines below are the shared defaults; to give one clicker
+ * different timing, edit its initializer instead.
  * ================================================================== */
 
-#define CLICK_BUTTON   KC_MS_BTN2 /* which mouse button to click  */
 #define CLICK_MIN_MS   25  /* shortest gap between clicks (ms)   */
 #define CLICK_MAX_MS   50  /* longest gap between clicks (ms)    */
 #define CLICK_HOLD_MS  10  /* how long the button stays down (ms)*/
 #define CLICK_MAX_HOLD 0   /* safety cutoff in ms; 0 disables it */
 
 /* xorshift32 PRNG. Avoids rand()/srand(), which pull in more than we
- * need and behave differently across targets. */
+ * need and behave differently across targets. Shared by both
+ * clickers, which keeps their sequences from lining up. */
 static uint32_t ac_rng = 0x2545F491UL;
 
 static uint32_t ac_rng_next(void) {
@@ -50,30 +56,102 @@ static uint8_t ac_rng_range(uint8_t lo, uint8_t hi) {
   return lo + (uint8_t)(ac_rng_next() % (uint32_t)(hi - lo + 1));
 }
 
-static bool     ac_active   = false;
-static bool     ac_btn_down = false;
-static uint16_t ac_last     = 0;
-static uint16_t ac_started  = 0;
-static uint8_t  ac_delay    = 0;
+typedef struct {
+  /* configuration */
+  uint16_t button;    /* which mouse button this clicker taps */
+  uint8_t  min_ms;
+  uint8_t  max_ms;
+  uint8_t  hold_ms;
+  uint16_t max_hold;
+  /* runtime state */
+  bool     active;
+  bool     btn_down;
+  uint16_t last;
+  uint16_t started;
+  uint8_t  delay;
+} autoclick_t;
 
-static void autoclick_stop(void) {
-  ac_active = false;
-  if (ac_btn_down) {
-    unregister_code(CLICK_BUTTON);
-    ac_btn_down = false;
+static autoclick_t ac_right = {
+  .button   = KC_MS_BTN2,
+  .min_ms   = CLICK_MIN_MS,
+  .max_ms   = CLICK_MAX_MS,
+  .hold_ms  = CLICK_HOLD_MS,
+  .max_hold = CLICK_MAX_HOLD,
+};
+
+static autoclick_t ac_left = {
+  .button   = KC_MS_BTN1,
+  .min_ms   = CLICK_MIN_MS,
+  .max_ms   = CLICK_MAX_MS,
+  .hold_ms  = CLICK_HOLD_MS,
+  .max_hold = CLICK_MAX_HOLD,
+};
+
+static void autoclick_stop(autoclick_t *ac) {
+  ac->active = false;
+  if (ac->btn_down) {
+    unregister_code(ac->button);
+    ac->btn_down = false;
   }
+}
+
+static void autoclick_start(autoclick_t *ac) {
+  /* reseed off the running timer so each hold differs */
+  ac_rng ^= timer_read32();
+  if (ac_rng == 0) {
+    ac_rng = 0x2545F491UL;
+  }
+  ac->active   = true;
+  ac->btn_down = false;
+  ac->last     = timer_read();
+  ac->started  = ac->last;
+  ac->delay    = 0;               /* fire on the next matrix scan */
+}
+
+static void autoclick_task(autoclick_t *ac) {
+  if (!ac->active) {
+    return;
+  }
+
+  if (ac->max_hold > 0 && timer_elapsed(ac->started) > ac->max_hold) {
+    autoclick_stop(ac);
+    return;
+  }
+
+  if (timer_elapsed(ac->last) < ac->delay) {
+    return;
+  }
+
+  if (ac->btn_down) {
+    unregister_code(ac->button);
+    ac->btn_down = false;
+    ac->delay    = ac_rng_range(ac->min_ms, ac->max_ms);
+  } else {
+    register_code(ac->button);
+    ac->btn_down = true;
+    ac->delay    = ac->hold_ms;
+  }
+
+  ac->last = timer_read();
 }
 
 
 /* ==================================================================
- * DUALHOLD - latch two letters down
+ * DUALHOLD / DUALTOG - hold two letters down
  *
- * First tap holds both DH_KEY_1 and DH_KEY_2 down; a second tap
- * releases them. Both go down in a single USB report.
+ * DUALHOLD is momentary: both DH_KEY_1 and DH_KEY_2 go down while the
+ * key is held and release when it is let go.
  *
- * Caveat: physically typing either letter while the latch is engaged
- * will send that key's release and silently break the latch for that
- * letter. Avoid typing i/j while it is on.
+ * DUALTOG is a latch: one tap holds both letters, another tap
+ * releases them.
+ *
+ * Both share dh_active, so DUALHOLD's release will also clear a latch
+ * set by DUALTOG. That keeps the two from fighting and means neither
+ * can leave a letter stuck down.
+ *
+ * Caveat (mainly affects DUALTOG): physically typing either letter
+ * while the letters are held will send that key's release and
+ * silently break it for that letter.
  * ================================================================== */
 
 #define DH_KEY_1 KC_I
@@ -104,92 +182,92 @@ static void dualhold_start(void) {
 
 const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
   [0] = LAYOUT_moonlander(
-    KC_GRAVE,       KC_1,           KC_2,           KC_3,           KC_4,           KC_5,           MO(4),                                          MO(7),          KC_6,           KC_7,           KC_8,           KC_9,           KC_0,           KC_DELETE,      
-    KC_TAB,         KC_Q,           KC_W,           KC_E,           KC_R,           KC_T,           ST_MACRO_0,                                     TG(9),          KC_Y,           KC_U,           KC_I,           KC_O,           KC_P,           KC_BSLS,        
-    KC_ESCAPE,      KC_A,           KC_S,           KC_D,           KC_F,           KC_G,           ST_MACRO_1,                                                                     DM_PLY1,        KC_H,           KC_J,           KC_K,           KC_L,           KC_SCLN,        KC_QUOTE,       
-    KC_LEFT_SHIFT,  KC_Z,           KC_X,           KC_C,           KC_V,           KC_B,                                           KC_N,           KC_M,           KC_COMMA,       KC_DOT,         KC_SLASH,       KC_RIGHT_SHIFT, 
-    KC_APPLICATION, KC_RIGHT_ALT,   RALT(KC_RIGHT_CTRL),KC_LEFT_GUI,    KC_LEFT_ALT,    TG(8),                                                                                                          TG(1),          KC_LEFT,        KC_DOWN,        KC_UP,          KC_RIGHT,       KC_CAPS,        
-    KC_SPACE,       KC_BSPC,        KC_LEFT_CTRL,                   MO(2),          MO(3),          KC_ENTER
+    KC_GRAVE,       KC_1,           KC_2,                KC_3,                 KC_4,               KC_5,           MO(4),                                          MO(7),          KC_6,           KC_7,                 KC_8,                KC_9,                KC_0,           KC_DELETE,
+    KC_TAB,         KC_Q,           KC_W,                KC_E,                 KC_R,               KC_T,           ST_MACRO_0,                                     TG(9),          KC_Y,           KC_U,                 KC_I,                KC_O,                KC_P,           KC_BSLS,
+    KC_ESCAPE,      KC_A,           KC_S,                KC_D,                 KC_F,               KC_G,           ST_MACRO_1,                                     DM_PLY1,        KC_H,           KC_J,                 KC_K,                KC_L,                KC_SCLN,        KC_QUOTE,
+    KC_LEFT_SHIFT,  KC_Z,           KC_X,                KC_C,                 KC_V,               KC_B,                                                                           KC_N,           KC_M,                 KC_COMMA,            KC_DOT,              KC_SLASH,       KC_RIGHT_SHIFT,
+    KC_APPLICATION, KC_RIGHT_ALT,   RALT(KC_RIGHT_CTRL), KC_LEFT_GUI,          KC_LEFT_ALT,        TG(8),                                                                          TG(1),          KC_LEFT,              KC_DOWN,             KC_UP,               KC_RIGHT,       KC_CAPS,
+    KC_SPACE,       KC_BSPC,        KC_LEFT_CTRL,                                                                                                                                                                                             MO(2),               MO(3),          KC_ENTER
   ),
   [1] = LAYOUT_moonlander(
-    KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    TO(0),          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,                                                                                                          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_UNDS,        KC_TRANSPARENT, KC_NO,                          KC_TRANSPARENT, KC_TRANSPARENT, TO(0)
+    KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    TO(0),          KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_NO,          KC_NO,          KC_NO,               KC_NO,                KC_NO,              KC_NO,                                                                          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_UNDS,        KC_TRANSPARENT, KC_NO,                                                                                                                                                                                                    KC_TRANSPARENT,      KC_TRANSPARENT, TO(0)
   ),
   [2] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, RALT(KC_E),     RALT(KC_F),     RALT(KC_G),     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, RALT(KC_H),     RALT(KC_V),     RALT(KC_COMMA), RALT(KC_DOT),   KC_TRANSPARENT, 
-    KC_TRANSPARENT, RALT(KC_Z),     ST_MACRO_2,     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_TRANSPARENT,                                                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                          KC_TRANSPARENT, KC_NO,          KC_TRANSPARENT
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, RALT(KC_E),          RALT(KC_F),           RALT(KC_G),         KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, RALT(KC_H),           RALT(KC_V),          RALT(KC_COMMA),      RALT(KC_DOT),   KC_TRANSPARENT,
+    KC_TRANSPARENT, RALT(KC_Z),     ST_MACRO_2,          KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_NO,          KC_NO,          KC_NO,               KC_NO,                KC_NO,              KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                                                                                                                                                                                    KC_TRANSPARENT,      KC_NO,          KC_TRANSPARENT
   ),
   [3] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_F1,          KC_F2,          KC_F3,          KC_F4,          KC_F5,          KC_NO,                                          KC_NO,          KC_F6,          KC_F7,          KC_F8,          KC_F9,          KC_F10,         KC_F11,         
-    KC_GRAVE,       KC_EXLM,        KC_AT,          KC_HASH,        KC_DLR,         KC_PERC,        KC_NO,                                          KC_NO,          KC_CIRC,        KC_AMPR,        KC_ASTR,        KC_MINUS,       KC_EQUAL,       KC_PIPE,        
-    KC_NO,          KC_LBRC,        KC_RBRC,        KC_LPRN,        KC_RPRN,        KC_NO,          KC_NO,                                                                          KC_NO,          ST_MACRO_3,     ST_MACRO_4,     KC_NO,          KC_UNDS,        KC_COLN,        KC_DQUO,        
-    KC_TRANSPARENT, LSFT(KC_GRAVE), RALT(KC_EQUAL), KC_LCBR,        KC_RCBR,        KC_NO,                                          RALT(KC_MINUS), RALT(LSFT(KC_MINUS)),KC_LABK,        KC_RABK,        KC_QUES,        KC_TRANSPARENT, 
-    KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,                                                                                                          KC_MS_BTN3,     KC_HOME,        KC_NO,          KC_NO,          KC_END,         KC_F12,         
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_NO,          KC_TRANSPARENT, KC_NO
+    KC_TRANSPARENT, KC_F1,          KC_F2,               KC_F3,                KC_F4,              KC_F5,          KC_NO,                                          KC_NO,          KC_F6,          KC_F7,                KC_F8,               KC_F9,               KC_F10,         KC_F11,
+    KC_GRAVE,       KC_EXLM,        KC_AT,               KC_HASH,              KC_DLR,             KC_PERC,        KC_NO,                                          KC_NO,          KC_CIRC,        KC_AMPR,              KC_ASTR,             KC_MINUS,            KC_EQUAL,       KC_PIPE,
+    KC_NO,          KC_LBRC,        KC_RBRC,             KC_LPRN,              KC_RPRN,            KC_NO,          KC_NO,                                          KC_NO,          ST_MACRO_3,     ST_MACRO_4,           KC_NO,               KC_UNDS,             KC_COLN,        KC_DQUO,
+    KC_TRANSPARENT, LSFT(KC_GRAVE), RALT(KC_EQUAL),      KC_LCBR,              KC_RCBR,            KC_NO,                                                                          RALT(KC_MINUS), RALT(LSFT(KC_MINUS)), KC_LABK,             KC_RABK,             KC_QUES,        KC_TRANSPARENT,
+    KC_NO,          KC_NO,          KC_NO,               KC_NO,                KC_NO,              KC_NO,                                                                          KC_MS_BTN3,     KC_HOME,              KC_NO,               KC_NO,               KC_END,         KC_F12,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                                                                                                           KC_NO,               KC_TRANSPARENT, KC_NO
   ),
   [4] = LAYOUT_moonlander(
-    KC_TRANSPARENT, OSL(6),         KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, DM_REC1,                                        KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_MY_COMPUTER, KC_PSCR,        KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, DM_RSTP,                                                                        KC_NO,          KC_TRANSPARENT, KC_MEDIA_PREV_TRACK,KC_MEDIA_PLAY_PAUSE,KC_MEDIA_NEXT_TRACK,KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_AUDIO_MUTE,  KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_AUDIO_VOL_DOWN,KC_AUDIO_VOL_UP,KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    KC_TRANSPARENT, OSL(6),         KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, DM_REC1,                                        KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_MY_COMPUTER,      KC_PSCR,        KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, DM_RSTP,                                        KC_NO,          KC_TRANSPARENT, KC_MEDIA_PREV_TRACK,  KC_MEDIA_PLAY_PAUSE, KC_MEDIA_NEXT_TRACK, KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_AUDIO_MUTE,        KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_AUDIO_VOL_DOWN,   KC_AUDIO_VOL_UP,     KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                                                                                                           KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT
   ),
   [5] = LAYOUT_moonlander(
-    ST_MACRO_5,     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          
-    KC_RCBR,        KC_COMMA,       KC_DOT,         LCTL(LSFT(KC_COMMA)),LCTL(LSFT(KC_DOT)),KC_NO,          KC_NO,                                          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, ST_MACRO_6,     KC_NO,          TO(0),                                                                          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          
-    KC_NO,          LCTL(KC_Z),     KC_MS_WH_UP,    KC_MS_WH_DOWN,  LCTL(KC_V),     KC_NO,                                          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          
-    KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,                                                                                                          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          KC_NO,          
-    KC_ENTER,       KC_TRANSPARENT, KC_NO,                          KC_NO,          KC_NO,          KC_NO
+    ST_MACRO_5,     KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_NO,                                          KC_NO,          KC_NO,          KC_NO,                KC_NO,               KC_NO,               KC_NO,          KC_NO,
+    KC_RCBR,        KC_COMMA,       KC_DOT,              LCTL(LSFT(KC_COMMA)), LCTL(LSFT(KC_DOT)), KC_NO,          KC_NO,                                          KC_NO,          KC_NO,          KC_NO,                KC_NO,               KC_NO,               KC_NO,          KC_NO,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       ST_MACRO_6,         KC_NO,          TO(0),                                          KC_NO,          KC_NO,          KC_NO,                KC_NO,               KC_NO,               KC_NO,          KC_NO,
+    KC_NO,          LCTL(KC_Z),     KC_MS_WH_UP,         KC_MS_WH_DOWN,        LCTL(KC_V),         KC_NO,                                                                          KC_NO,          KC_NO,                KC_NO,               KC_NO,               KC_NO,          KC_NO,
+    KC_NO,          KC_NO,          KC_NO,               KC_NO,                KC_NO,              KC_NO,                                                                          KC_NO,          KC_NO,                KC_NO,               KC_NO,               KC_NO,          KC_NO,
+    KC_ENTER,       KC_TRANSPARENT, KC_NO,                                                                                                                                                                                                    KC_NO,               KC_NO,          KC_NO
   ),
   [6] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_TRANSPARENT, QK_BOOT,        KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    KC_TRANSPARENT, KC_TRANSPARENT, QK_BOOT,             KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                                                                                                           KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT
   ),
   [7] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, TO(5),          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, ST_MACRO_7,     KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_NUM,         KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, AS_TOGG,        
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       TO(5),               KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, ST_MACRO_7,          KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_NUM,         KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, AS_TOGG,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                                                                                                           KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT
   ),
   [8] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_F,           KC_J,           KC_K,           KC_L,           KC_F,           KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_LABK,        KC_RABK,        KC_COMMA,       KC_DOT,         KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_F,           KC_J,                KC_K,                 KC_L,               KC_F,           KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_LABK,        KC_RABK,             KC_COMMA,             KC_DOT,             KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                                                                                                           KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT
   ),
   [9] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_Y,                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_H,                                                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_SPACE,                                                                                                       KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_SPACE,        AUTOCLK,       DUALHOLD,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_Y,                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_H,                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     DUALTOG,                                                                        AUTOCLK_L,      KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    DUALHOLD,       AUTOCLK_R,      KC_LEFT_CTRL,                                                                                                                                                                                             KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT
   ),
   [10] = LAYOUT_moonlander(
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_Y,                                           KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_H,                                                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_HYPR,        KC_MEH,         KC_RIGHT_ALT,   LSFT(KC_LEFT_ALT),KC_LEFT_ALT,    KC_TRANSPARENT,                                                                                                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT, 
-    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                 KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_TRANSPARENT,                                 KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_Y,                                           KC_NO,          KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT, KC_H,                                           KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,      KC_TRANSPARENT,       KC_TRANSPARENT,     KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_HYPR,        KC_MEH,         KC_RIGHT_ALT,        LSFT(KC_LEFT_ALT),    KC_LEFT_ALT,        KC_TRANSPARENT,                                                                 KC_TRANSPARENT, KC_TRANSPARENT,       KC_TRANSPARENT,      KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT,
+    KC_TRANSPARENT, KC_TRANSPARENT, KC_TRANSPARENT,                                                                                                                                                                                           KC_TRANSPARENT,      KC_TRANSPARENT, KC_TRANSPARENT
   ),
 };
 
@@ -379,24 +457,31 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     }
     break;
 
-    case AUTOCLK:
+    case AUTOCLK_R:                 /* right button */
     if (record->event.pressed) {
-      /* reseed off the running timer so each hold differs */
-      ac_rng ^= timer_read32();
-      if (ac_rng == 0) {
-        ac_rng = 0x2545F491UL;
-      }
-      ac_active   = true;
-      ac_btn_down = false;
-      ac_last     = timer_read();
-      ac_started  = ac_last;
-      ac_delay    = 0;              /* fire on the next matrix scan */
+      autoclick_start(&ac_right);
     } else {
-      autoclick_stop();
+      autoclick_stop(&ac_right);
     }
     return false;
 
-    case DUALHOLD:
+    case AUTOCLK_L:                 /* left button */
+    if (record->event.pressed) {
+      autoclick_start(&ac_left);
+    } else {
+      autoclick_stop(&ac_left);
+    }
+    return false;
+
+    case DUALHOLD:                  /* momentary: down while held */
+    if (record->event.pressed) {
+      dualhold_start();
+    } else {
+      dualhold_stop();
+    }
+    return false;
+
+    case DUALTOG:                   /* latch: tap on, tap off */
     if (record->event.pressed) {    /* act on press, ignore release */
       if (dh_active) {
         dualhold_stop();
@@ -420,29 +505,6 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
 
 
 void matrix_scan_user(void) {
-  if (!ac_active) {
-    return;
-  }
-
-  /* folded away by the compiler when CLICK_MAX_HOLD is 0 */
-  if (CLICK_MAX_HOLD > 0 && timer_elapsed(ac_started) > CLICK_MAX_HOLD) {
-    autoclick_stop();
-    return;
-  }
-
-  if (timer_elapsed(ac_last) < ac_delay) {
-    return;
-  }
-
-  if (ac_btn_down) {
-    unregister_code(CLICK_BUTTON);
-    ac_btn_down = false;
-    ac_delay    = ac_rng_range(CLICK_MIN_MS, CLICK_MAX_MS);
-  } else {
-    register_code(CLICK_BUTTON);
-    ac_btn_down = true;
-    ac_delay    = CLICK_HOLD_MS;
-  }
-
-  ac_last = timer_read();
+  autoclick_task(&ac_right);
+  autoclick_task(&ac_left);
 }
