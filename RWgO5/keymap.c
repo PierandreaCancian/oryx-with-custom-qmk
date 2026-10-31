@@ -34,9 +34,9 @@ enum custom_keycodes {
  * different timing, edit its initializer instead.
  * ================================================================== */
 
-#define CLICK_MIN_MS   35  /* shortest gap between clicks (ms)   */
-#define CLICK_MAX_MS   45  /* longest gap between clicks (ms)    */
-#define CLICK_HOLD_MS  10  /* how long the button stays down (ms)*/
+#define CLICK_MIN_MS   45  /* shortest gap between clicks (ms)   */
+#define CLICK_MAX_MS   55  /* longest gap between clicks (ms)    */
+#define CLICK_HOLD_MS  8  /* how long the button stays down (ms)*/
 #define CLICK_MAX_HOLD 0   /* safety cutoff in ms; 0 disables it */
 
 /* xorshift32 PRNG. Avoids rand()/srand(), which pull in more than we
