@@ -38,6 +38,7 @@ enum custom_keycodes {
 #define CLICK_MAX_MS   88  /* longest gap between clicks (ms)    */
 #define CLICK_HOLD_MS  8  /* how long the button stays down (ms)*/
 #define CLICK_MAX_HOLD 0   /* safety cutoff in ms; 0 disables it */
+#define CLICK_HOLD_KEY KC_B /* key AUTOCLK_R holds while running */
 
 /* xorshift32 PRNG. Avoids rand()/srand(), which pull in more than we
  * need and behave differently across targets. Shared by both
@@ -59,6 +60,7 @@ static uint8_t ac_rng_range(uint8_t lo, uint8_t hi) {
 typedef struct {
   /* configuration */
   uint16_t button;    /* which mouse button this clicker taps */
+  uint16_t hold_key;  /* key held for the whole run; 0 for none */
   uint8_t  min_ms;
   uint8_t  max_ms;
   uint8_t  hold_ms;
@@ -73,6 +75,7 @@ typedef struct {
 
 static autoclick_t ac_right = {
   .button   = KC_MS_BTN2,
+  .hold_key = CLICK_HOLD_KEY,
   .min_ms   = CLICK_MIN_MS,
   .max_ms   = CLICK_MAX_MS,
   .hold_ms  = CLICK_HOLD_MS,
@@ -81,6 +84,7 @@ static autoclick_t ac_right = {
 
 static autoclick_t ac_left = {
   .button   = KC_MS_BTN1,
+  .hold_key = 0,
   .min_ms   = CLICK_MIN_MS,
   .max_ms   = CLICK_MAX_MS,
   .hold_ms  = CLICK_HOLD_MS,
@@ -88,10 +92,15 @@ static autoclick_t ac_left = {
 };
 
 static void autoclick_stop(autoclick_t *ac) {
+  bool was_active = ac->active;
   ac->active = false;
   if (ac->btn_down) {
     unregister_code(ac->button);
     ac->btn_down = false;
+  }
+  /* only release the held key if this instance actually had it down */
+  if (was_active && ac->hold_key) {
+    unregister_code(ac->hold_key);
   }
 }
 
@@ -100,6 +109,9 @@ static void autoclick_start(autoclick_t *ac) {
   ac_rng ^= timer_read32();
   if (ac_rng == 0) {
     ac_rng = 0x2545F491UL;
+  }
+  if (!ac->active && ac->hold_key) {
+    register_code(ac->hold_key);  /* goes down before the first click */
   }
   ac->active   = true;
   ac->btn_down = false;
